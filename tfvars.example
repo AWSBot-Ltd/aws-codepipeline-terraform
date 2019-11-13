@@ -1,0 +1,4 @@
+public_subnets  = ["subnet-1111aaaa", "subnet-2222bbbb", "subnet-3333cccc"]
+security_groups = ["sg-d5d5d5d5"]
+ami_id = "ami-abcd1234"
+vpc_id = "vpc-0997fedc"

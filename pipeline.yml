@@ -1,0 +1,303 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: >
+  AWSBot CloudFormation Template Continuous Delivery: This template
+  builds an AWS CodePipeline pipeline that implements a continuous delivery release
+  process for AWS CloudFormation stacks.
+
+Parameters:
+  Environment:
+    Description: Environment to deploy to
+    Type: String
+    AllowedValues:
+      - dev
+      - test
+      - prod
+
+  RepositoryName:
+    Description: Name of the CodeCommit repository
+    Type: String
+
+  TerraformVersion:
+    Description: The Version of Terraform to use
+    Type: String
+    Default: 0.12.13
+
+  StateBucket:
+    Description: The bucket to store the state in
+    Type: String
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "General Settings"
+        Parameters:
+          - Environment
+      - Label:
+          default: "CodeBuild Settings"
+        Parameters:
+          - RepositoryName
+          - TerraformVersion
+
+Mappings:
+  EnvironmentMap:
+    dev:
+      "ArtifactStoreBucket": "artifact-store-awsbot-com-eu-west-1-701168364071"
+      "PrettyName": "Dev"
+      "Region": "eu-west-1"
+    test:
+      "ArtifactStoreBucket": ""
+      "PrettyName": "Test"
+      "Region": "eu-west-1"
+    prod:
+      "ArtifactStoreBucket": ""
+      "PrettyName": "Prod"
+      "Region": "eu-west-1"
+
+Conditions:
+  CreateCodeCommitPipeline: !Equals [dev, !Ref Environment]
+  CreateS3Pipeline: !Not
+    - !Equals [dev, !Ref Environment]
+
+Resources:
+  CodePipelineRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AWSLambdaFullAccess'
+        - 'arn:aws:iam::aws:policy/AWSElasticBeanstalkFullAccess'
+        - 'arn:aws:iam::aws:policy/AmazonECS_FullAccess'
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: CodePipelinePolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "codecommit:*"
+                  - "s3:*"
+                  - "ecs:*"
+                  - "codebuild:StartBuild"
+                  - "codebuild:BatchGetBuilds"
+                  - "iam:PassRole"
+                  - "sns:Publish"
+                Resource: '*'
+
+  CodePipelineBuildRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      Policies:
+        - PolicyName: CodeCommitPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "codecommit:*"
+                Resource: '*'
+        - PolicyName: CLoudWatchLogsPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "logs:CreateLogGroup"
+                  - "logs:CreateLogStream"
+                  - "logs:PutLogEvents"
+                Resource: '*'
+        - PolicyName: S3Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "s3:PutObject"
+                  - "s3:GetObject"
+                  - "s3:GetObjectVersion"
+                  - "s3:List*"
+                Resource: '*'
+        - PolicyName: CodePipelineCFNPolicy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "iam:CreateRole"
+                  - "iam:DeleteRole"
+                  - "iam:PutRolePolicy"
+                  - "iam:DeleteRolePolicy"
+                  - "iam:AttachRolePolicy"
+                  - "iam:PassRole"
+                  - "iam:GetRole"
+                  - "iam:DetachRolePolicy"
+                  - "lambda:*"
+                  - "sns:ListTopics"
+                  - "sns:CreateTopic"
+                  - "sns:DeleteTopic"
+                  - "sns:GetTopicAttributes"
+                  - "sns:SetTopicAttributes"
+                  - "sns:Subscribe"
+                  - "s3:*"
+                  - "events:*"
+                  - "glue:*"
+                  - "ecs:*"
+                  - "elasticloadbalancing:*"
+                  - "ec2:*"
+                  - "iam:*"
+                  - "route53:*"
+                  - "autoscaling:*"
+                  - "cloudwatch:*"
+                Resource: '*'
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Condition: CreateCodeCommitPipeline
+    Properties:
+      ArtifactStore:
+        Location: !FindInMap [ EnvironmentMap, !Ref Environment, ArtifactStoreBucket ]
+        Type: S3
+      DisableInboundStageTransitions: []
+      Name: !Join
+        - '-'
+        - - !Ref RepositoryName
+          - !Ref Environment
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              Configuration:
+                RepositoryName: !Ref RepositoryName
+                BranchName: master
+              OutputArtifacts:
+                - Name: Source
+              RunOrder: '1'
+        - Name: Terraform
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Join
+                  - '-'
+                  - - !Ref RepositoryName
+                    - !Ref Environment
+              InputArtifacts:
+                - Name: Source
+              OutputArtifacts:
+                - Name: Build
+              RunOrder: '1'
+
+
+  S3Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Condition: CreateS3Pipeline
+    Properties:
+      ArtifactStore:
+        Location: !FindInMap [ EnvironmentMap, !Ref Environment, ArtifactStoreBucket ]
+        Type: S3
+      DisableInboundStageTransitions: []
+      Name: !Join
+        - '-'
+        - - !Ref RepositoryName
+          - !Ref Environment
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: '1'
+              Configuration:
+                S3Bucket: !FindInMap [ EnvironmentMap, !Ref Environment, ArtifactStoreBucket ]
+                S3ObjectKey: !Join
+                  - ''
+                  - - !Ref RepositoryName
+                    - /deploy.zip
+              OutputArtifacts:
+                - Name: Source
+              RunOrder: '1'
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Join
+                  - '-'
+                  - - !Ref RepositoryName
+                    - !Ref Environment
+              InputArtifacts:
+                - Name: Source
+              OutputArtifacts:
+                - Name: Build
+              RunOrder: '1'
+
+  CodeBuild:
+    Type: "AWS::CodeBuild::Project"
+    Properties:
+      Name: !Join
+        - '-'
+        - - !Ref RepositoryName
+          - !Ref Environment
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/standard:2.0
+        PrivilegedMode: false
+        EnvironmentVariables:
+          - Name: ENVIRONMENT
+            Type: PLAINTEXT
+            Value: !Ref Environment
+          - Name: TERRAFORM_VERSION
+            Type: PLAINTEXT
+            Value: !Ref TerraformVersion
+          - Name: REPOSITORY_NAME
+            Type: PLAINTEXT
+            Value: !Ref RepositoryName
+          - Name: STATE_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref StateBucket
+      ServiceRole: !Ref CodePipelineBuildRole
+      Source:
+        Type: CODEPIPELINE
+      TimeoutInMinutes: '60'
